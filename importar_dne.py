@@ -1,209 +1,108 @@
 import os
 import mysql.connector
 from dotenv import load_dotenv
+import tempfile
+import shutil
 
-# --------------------------------------
-# Carregar variáveis do arquivo .env
-# --------------------------------------
+# Carregar .env
 load_dotenv()
 
-MYSQL_HOST = os.getenv("MYSQL_HOST")
-MYSQL_USER = os.getenv("MYSQL_USER")
+MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
-MYSQL_DATABASE = os.getenv("MYSQL_DATABASE")
-DNE_PATH = os.getenv("DNE_PATH")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "dne")
+DNE_PATH = os.getenv("DNE_PATH")  # <-- caminho deve estar com / ou em raw string
 
-# --------------------------------------
-# Conectar ao MySQL (sem DB primeiro)
-# --------------------------------------
+# Conexão com MySQL
 conn = mysql.connector.connect(
     host=MYSQL_HOST,
     user=MYSQL_USER,
     password=MYSQL_PASSWORD,
+    database=MYSQL_DATABASE,
     allow_local_infile=True
 )
-cursor = conn.cursor()
+cur = conn.cursor()
 
-# --------------------------------------
-# Criar banco de dados
-# --------------------------------------
-cursor.execute(f"CREATE DATABASE IF NOT EXISTS {MYSQL_DATABASE}")
-cursor.execute(f"USE {MYSQL_DATABASE}")
-print(f"Banco '{MYSQL_DATABASE}' carregado.\n")
 
-# --------------------------------------
-# Tabelas fixas (não logradouro)
-# --------------------------------------
-tabelas_fixas = {
-    "ECT_PAIS": """
-        CREATE TABLE IF NOT EXISTS ECT_PAIS (
-            PAIS_CODIGO INT,
-            PAIS_NOME VARCHAR(200),
-            SIGLA VARCHAR(10)
-        )
-    """,
-    "LOG_BAIRRO": """
-        CREATE TABLE IF NOT EXISTS LOG_BAIRRO (
-            BAIRRO_COD INT,
-            BAIRRO_NOME VARCHAR(200),
-            BAIRRO_ABREV VARCHAR(50),
-            LOCALIDADE_COD INT
-        )
-    """,
-    "LOG_CPC": """
-        CREATE TABLE IF NOT EXISTS LOG_CPC (
-            CPC_COD INT,
-            LOCALIDADE_COD INT,
-            LOGRADOURO_COD INT,
-            NUM_INICIAL VARCHAR(20),
-            NUM_FINAL VARCHAR(20),
-            PAR_IMPAR CHAR(1),
-            NOME VARCHAR(200)
-        )
-    """,
-    "LOG_FAIXA_BAIRRO": """
-        CREATE TABLE IF NOT EXISTS LOG_FAIXA_BAIRRO (
-            BAIRRO_COD INT,
-            NUM_INICIAL VARCHAR(20),
-            NUM_FINAL VARCHAR(20),
-            PAR_IMPAR CHAR(1)
-        )
-    """,
-    "LOG_FAIXA_CPC": """
-        CREATE TABLE IF NOT EXISTS LOG_FAIXA_CPC (
-            CPC_COD INT,
-            NUM_INICIAL VARCHAR(20),
-            NUM_FINAL VARCHAR(20),
-            PAR_IMPAR CHAR(1)
-        )
-    """,
-    "LOG_FAIXA_LOCALIDADE": """
-        CREATE TABLE IF NOT EXISTS LOG_FAIXA_LOCALIDADE (
-            LOCALIDADE_COD INT,
-            NUM_INICIAL VARCHAR(20),
-            NUM_FINAL VARCHAR(20),
-            PAR_IMPAR CHAR(1)
-        )
-    """,
-    "LOG_FAIXA_UF": """
-        CREATE TABLE IF NOT EXISTS LOG_FAIXA_UF (
-            UF CHAR(2),
-            NUM_INICIAL VARCHAR(20),
-            NUM_FINAL VARCHAR(20),
-            PAR_IMPAR CHAR(1)
-        )
-    """,
-    "LOG_FAIXA_UOP": """
-        CREATE TABLE IF NOT EXISTS LOG_FAIXA_UOP (
-            UOP_COD INT,
-            NUM_INICIAL VARCHAR(20),
-            NUM_FINAL VARCHAR(20),
-            PAR_IMPAR CHAR(1)
-        )
-    """,
-    "LOG_GRANDE_USUARIO": """
-        CREATE TABLE IF NOT EXISTS LOG_GRANDE_USUARIO (
-            GU_COD INT,
-            GU_NOME VARCHAR(200),
-            LOCALIDADE_COD INT,
-            UF CHAR(2),
-            CEP CHAR(8)
-        )
-    """,
-    "LOG_LOCALIDADE": """
-        CREATE TABLE IF NOT EXISTS LOG_LOCALIDADE (
-            LOCALIDADE_COD INT,
-            LOCALIDADE_NOME VARCHAR(200),
-            LOCALIDADE_ABREV VARCHAR(50),
-            MUNICIPIO_COD INT,
-            UF CHAR(2),
-            CEP CHAR(8)
-        )
-    """,
+# -------------------------------------------------------------------
+# UTILITÁRIO: converter arquivo ISO-8859-1 → UTF-8
+# -------------------------------------------------------------------
+def converter_para_utf8(caminho_original):
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
+
+    with open(caminho_original, "r", encoding="latin1", errors="replace") as src:
+        with open(temp_file.name, "w", encoding="utf8") as dst:
+            shutil.copyfileobj(src, dst)
+
+    return temp_file.name
+
+
+# -------------------------------------------------------------------
+# Função para importar arquivo via LOAD DATA INFILE
+# -------------------------------------------------------------------
+def importar_arquivo(tabela, arquivo):
+    caminho_abs = os.path.join(DNE_PATH, arquivo)
+
+    if not os.path.exists(caminho_abs):
+        print(f"   ❌ Arquivo NÃO encontrado: {caminho_abs}")
+        return
+
+    # converter encoding
+    arquivo_utf8 = converter_para_utf8(caminho_abs)
+
+    try:
+        sql = f"""
+            LOAD DATA LOCAL INFILE '{arquivo_utf8.replace("\\", "/")}'
+            INTO TABLE {tabela}
+            CHARACTER SET utf8
+            FIELDS TERMINATED BY '@'
+            LINES TERMINATED BY '\\n'
+        """
+        cur.execute(sql)
+        conn.commit()
+        print(f"   ✔ Importado: {arquivo}")
+
+    except Exception as e:
+        print(f"   ❌ Erro ao importar {arquivo}: {e}")
+
+    finally:
+        os.remove(arquivo_utf8)
+
+
+# -------------------------------------------------------------------
+# IMPORTAÇÃO DOS ARQUIVOS PRINCIPAIS
+# -------------------------------------------------------------------
+arquivos_principais = {
+    "ECT_PAIS": "ECT_PAIS.TXT",
+    "LOG_BAIRRO": "LOG_BAIRRO.TXT",
+    "LOG_CPC": "LOG_CPC.TXT",
+    "LOG_FAIXA_BAIRRO": "LOG_FAIXA_BAIRRO.TXT",
+    "LOG_FAIXA_CPC": "LOG_FAIXA_CPC.TXT",
+    "LOG_FAIXA_LOCALIDADE": "LOG_FAIXA_LOCALIDADE.TXT",
+    "LOG_FAIXA_UF": "LOG_FAIXA_UF.TXT",
+    "LOG_FAIXA_UOP": "LOG_FAIXA_UOP.TXT",
+    "LOG_GRANDE_USUARIO": "LOG_GRANDE_USUARIO.TXT",
+    "LOG_LOCALIDADE": "LOG_LOCALIDADE.TXT"
 }
 
-# Criar tabelas fixas
-print("Criando tabelas principais...")
-for nome, ddl in tabelas_fixas.items():
-    cursor.execute(ddl)
-    print(f" - OK: {nome}")
+print("\nImportando arquivos principais...\n")
+for tabela, arquivo in arquivos_principais.items():
+    importar_arquivo(tabela, arquivo)
 
-conn.commit()
-print("\nTabelas principais criadas.\n")
+# -------------------------------------------------------------------
+# IMPORTAR LOGRADOURO DE TODOS OS ESTADOS
+# -------------------------------------------------------------------
+print("\nImportando LOG_LOGRADOURO_XX ...\n")
 
-# ------------------------------------------------------
-# Criar tabela única para LOG_LOGRADOURO (todos estados)
-# ------------------------------------------------------
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS LOG_LOGRADOURO (
-        LOG_COD INT,
-        LOG_NOME VARCHAR(200),
-        TIPO VARCHAR(50),
-        BAIRRO_INI INT,
-        BAIRRO_FIM INT,
-        LOCALIDADE_COD INT,
-        CEP CHAR(8),
-        UF CHAR(2)
-    )
-""")
+ufs = [
+    "AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT","PA",
+    "PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"
+]
 
-print("Tabela unificada LOG_LOGRADOURO criada.\n")
-conn.commit()
+for uf in ufs:
+    nome_arq = f"LOG_LOGRADOURO_{uf}.TXT"
+    importar_arquivo("LOG_LOGRADOURO", nome_arq)
 
-# --------------------------------------
-# Importar arquivos fixos primeiro
-# --------------------------------------
-print("Importando arquivos básicos...")
-
-for tabela in tabelas_fixas:
-    arquivo = os.path.join(DNE_PATH, f"{tabela}.TXT")
-
-    if not os.path.exists(arquivo):
-        print(f"   ⚠ Arquivo não encontrado: {arquivo}")
-        continue
-
-    query = f"""
-        LOAD DATA LOCAL INFILE '{arquivo.replace("\\\\", "/")}'
-        INTO TABLE {tabela}
-        FIELDS TERMINATED BY ';'
-        LINES TERMINATED BY '\\n'
-        IGNORE 1 LINES;
-    """
-    try:
-        cursor.execute(query)
-        conn.commit()
-        print(f"   ✔ Importado: {tabela}")
-    except Exception as e:
-        print(f"   ❌ Erro ao importar {tabela}: {e}")
-
-# ------------------------------------------------------
-# Importar TODOS os arquivos LOG_LOGRADOURO_XX.TXT
-# ------------------------------------------------------
-print("\nImportando LOG_LOGRADOURO_XX para a tabela unificada...")
-
-for file in os.listdir(DNE_PATH):
-    if file.startswith("LOG_LOGRADOURO_") and file.endswith(".TXT"):
-        uf = file.split("_")[2].split(".")[0]  # extrai o UF
-        caminho = os.path.join(DNE_PATH, file).replace("\\", "/")
-
-        query = f"""
-            LOAD DATA LOCAL INFILE '{caminho}'
-            INTO TABLE LOG_LOGRADOURO
-            FIELDS TERMINATED BY ';'
-            LINES TERMINATED BY '\\n'
-            IGNORE 1 LINES
-            (LOG_COD, LOG_NOME, TIPO, BAIRRO_INI, BAIRRO_FIM, LOCALIDADE_COD, CEP)
-            SET UF = '{uf}';
-        """
-
-        try:
-            cursor.execute(query)
-            conn.commit()
-            print(f"   ✔ Importado: {file} → UF={uf}")
-        except Exception as e:
-            print(f"   ❌ Erro ao importar {file}: {e}")
-
-print("\nPROCESSO FINALIZADO COM SUCESSO.")
-
-cursor.close()
+print("\nPROCESSO FINALIZADO.\n")
+cur.close()
 conn.close()
